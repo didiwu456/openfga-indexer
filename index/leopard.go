@@ -1,26 +1,33 @@
 package index
 
-import "sync"
+import (
+	"sync"
 
-// defaultGroupRelation is the default relation name that denotes group membership.
-const defaultGroupRelation = "member"
-
-// defaultGroupPrefix is the default type prefix that identifies group objects.
-const defaultGroupPrefix = "group:"
+	"github.com/RoaringBitmap/roaring"
+)
 
 // leopardIndex is the concrete implementation of Index.
 //
-// memberToGroup  (MEMBER2GROUP): userID  → sorted set of direct parent groups
-// groupToGroup   (GROUP2GROUP):  groupID → sorted set of all descendant groups
+// All posting lists are stored as roaring bitmaps keyed by uint32 IDs
+// assigned by the intern table. This enables SIMD-accelerated set
+// intersection and compact in-memory representation.
 //
-// GROUP2GROUP is kept transitively consistent: when A→B and B→C exist,
-// GROUP2GROUP["A"] contains both B and C (and A itself).
+// Three maps are maintained:
+//
+//	memberToGroup  (MEMBER2GROUP): userID  → bitmap of direct parent group IDs
+//	groupToGroup   (GROUP2GROUP):  groupID → bitmap of all descendant group IDs (transitive, reflexive)
+//	directEdges:                   child groupID → bitmap of direct parent group IDs
+//
+// directEdges is the source of truth for the group topology. GROUP2GROUP is
+// a derived, pre-computed transitive closure. On delete, GROUP2GROUP is
+// recomputed via BFS from directEdges for the affected subgraph.
 type leopardIndex struct {
 	mu            sync.RWMutex
-	memberToGroup map[string]sortedSet // MEMBER2GROUP
-	groupToGroup  map[string]sortedSet // GROUP2GROUP
-	groupRelation string               // configured relation name
-	groupPrefix   string               // configured group prefix
+	strings       *intern
+	memberToGroup map[uint32]*roaring.Bitmap
+	groupToGroup  map[uint32]*roaring.Bitmap
+	directEdges   map[uint32]*roaring.Bitmap
+	cfg           IndexConfig
 }
 
 // New returns an empty, thread-safe Leopard index with default configuration.
@@ -28,68 +35,84 @@ func New() Index {
 	return NewWithConfig(IndexConfig{})
 }
 
-// NewWithConfig returns an empty, thread-safe Leopard index with custom configuration.
-// If IndexConfig fields are empty, defaults are used (GroupRelation: "member", GroupPrefix: "group:").
+// NewWithConfig returns an empty, thread-safe Leopard index with the given
+// configuration. Zero-value IndexConfig uses defaults ("member" relation,
+// "group:" prefix).
 func NewWithConfig(cfg IndexConfig) Index {
-	groupRel := cfg.GroupRelation
-	if groupRel == "" {
-		groupRel = defaultGroupRelation
+	if cfg.GroupRelation == "" {
+		cfg.GroupRelation = "member"
 	}
-	groupPfx := cfg.GroupPrefix
-	if groupPfx == "" {
-		groupPfx = defaultGroupPrefix
+	if cfg.GroupPrefix == "" {
+		cfg.GroupPrefix = "group:"
 	}
 	return &leopardIndex{
-		memberToGroup: make(map[string]sortedSet),
-		groupToGroup:  make(map[string]sortedSet),
-		groupRelation: groupRel,
-		groupPrefix:   groupPfx,
+		strings:       newIntern(),
+		memberToGroup: make(map[uint32]*roaring.Bitmap),
+		groupToGroup:  make(map[uint32]*roaring.Bitmap),
+		directEdges:   make(map[uint32]*roaring.Bitmap),
+		cfg:           cfg,
 	}
 }
 
 // ApplyTupleWrite records a new relationship tuple.
 //
-// We only index tuples of the form:
+// Only tuples whose relation matches cfg.GroupRelation are indexed.
+// Tuples of the form:
 //
-//	user:alice   member   group:engineering
-//	group:backend member  group:engineering   (group-in-group)
+//	user:alice   member   group:engineering   → user-in-group
+//	group:backend member  group:engineering   → group-in-group
 func (idx *leopardIndex) ApplyTupleWrite(user, relation, object string) {
-	if relation != idx.groupRelation {
+	if relation != idx.cfg.GroupRelation {
 		return
 	}
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
 	if idx.isGroup(user) {
-		// group-in-group edge: user (child group) → object (parent group)
-		idx.addGroupEdge(user, object)
+		childID := idx.strings.id(user)
+		parentID := idx.strings.id(object)
+		idx.addGroupEdge(childID, parentID)
 	} else {
-		// user-in-group edge
-		idx.memberToGroup[user] = idx.memberToGroup[user].add(object)
-		// Ensure GROUP2GROUP[object] contains at least itself so IsMember
-		// can find direct members via set intersection.
-		cur := idx.groupToGroup[object]
-		cur = cur.add(object)
-		idx.groupToGroup[object] = cur
+		userID := idx.strings.id(user)
+		groupID := idx.strings.id(object)
+		bm := idx.memberToGroup[userID]
+		if bm == nil {
+			bm = roaring.New()
+			idx.memberToGroup[userID] = bm
+		}
+		bm.Add(groupID)
+		// Ensure GROUP2GROUP[groupID] contains groupID itself (reflexive)
+		// so that direct membership is found by the intersection check.
+		idx.ensureSelf(groupID)
 	}
 }
 
 // ApplyTupleDelete removes an existing relationship tuple.
 func (idx *leopardIndex) ApplyTupleDelete(user, relation, object string) {
-	if relation != idx.groupRelation {
+	if relation != idx.cfg.GroupRelation {
 		return
 	}
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
 	if idx.isGroup(user) {
-		idx.removeGroupEdge(user, object)
+		childID, ok1 := idx.strings.lookup(user)
+		parentID, ok2 := idx.strings.lookup(object)
+		if ok1 && ok2 {
+			idx.removeGroupEdge(childID, parentID)
+		}
 	} else {
-		s := idx.memberToGroup[user].remove(object)
-		if len(s) == 0 {
-			delete(idx.memberToGroup, user)
-		} else {
-			idx.memberToGroup[user] = s
+		userID, ok1 := idx.strings.lookup(user)
+		groupID, ok2 := idx.strings.lookup(object)
+		if !ok1 || !ok2 {
+			return
+		}
+		bm := idx.memberToGroup[userID]
+		if bm != nil {
+			bm.Remove(groupID)
+			if bm.IsEmpty() {
+				delete(idx.memberToGroup, userID)
+			}
 		}
 	}
 }
@@ -101,27 +124,65 @@ func (idx *leopardIndex) IsMember(userID, groupID string) bool {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
-	memberGroups := idx.memberToGroup[userID]
-	if len(memberGroups) == 0 {
+	uID, ok := idx.strings.lookup(userID)
+	if !ok {
 		return false
 	}
-	descendants := idx.groupToGroup[groupID]
-	// GROUP2GROUP includes groupID itself, so direct membership is covered.
-	return intersects(memberGroups, descendants)
+	gID, ok := idx.strings.lookup(groupID)
+	if !ok {
+		return false
+	}
+	m2g := idx.memberToGroup[uID]
+	if m2g == nil {
+		return false
+	}
+	g2g := idx.groupToGroup[gID]
+	if g2g == nil {
+		return false
+	}
+	return m2g.Intersects(g2g)
 }
 
 // GroupsForUser returns the direct parent groups of userID.
 func (idx *leopardIndex) GroupsForUser(userID string) []string {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
-	return idx.memberToGroup[userID].clone()
+
+	uID, ok := idx.strings.lookup(userID)
+	if !ok {
+		return nil
+	}
+	bm := idx.memberToGroup[uID]
+	if bm == nil {
+		return nil
+	}
+	result := make([]string, 0, int(bm.GetCardinality()))
+	it := bm.Iterator()
+	for it.HasNext() {
+		result = append(result, idx.strings.str(it.Next()))
+	}
+	return result
 }
 
 // DescendantGroups returns all descendant group IDs of groupID (including self).
 func (idx *leopardIndex) DescendantGroups(groupID string) []string {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
-	return idx.groupToGroup[groupID].clone()
+
+	gID, ok := idx.strings.lookup(groupID)
+	if !ok {
+		return nil
+	}
+	bm := idx.groupToGroup[gID]
+	if bm == nil {
+		return nil
+	}
+	result := make([]string, 0, int(bm.GetCardinality()))
+	it := bm.Iterator()
+	for it.HasNext() {
+		result = append(result, idx.strings.str(it.Next()))
+	}
+	return result
 }
 
 // Snapshot returns a read-only copy of the index state.
@@ -130,108 +191,130 @@ func (idx *leopardIndex) Snapshot() Snapshot {
 	defer idx.mu.RUnlock()
 
 	m2g := make(map[string][]string, len(idx.memberToGroup))
-	for k, v := range idx.memberToGroup {
-		m2g[k] = v.clone()
+	for uid, bm := range idx.memberToGroup {
+		userStr := idx.strings.str(uid)
+		groups := make([]string, 0, int(bm.GetCardinality()))
+		it := bm.Iterator()
+		for it.HasNext() {
+			groups = append(groups, idx.strings.str(it.Next()))
+		}
+		m2g[userStr] = groups
 	}
+
 	g2g := make(map[string][]string, len(idx.groupToGroup))
-	for k, v := range idx.groupToGroup {
-		g2g[k] = v.clone()
+	for gid, bm := range idx.groupToGroup {
+		groupStr := idx.strings.str(gid)
+		descs := make([]string, 0, int(bm.GetCardinality()))
+		it := bm.Iterator()
+		for it.HasNext() {
+			descs = append(descs, idx.strings.str(it.Next()))
+		}
+		g2g[groupStr] = descs
 	}
+
 	return Snapshot{MemberToGroup: m2g, GroupToGroup: g2g}
 }
 
 // ── private helpers ──────────────────────────────────────────────────────────
 
-// addGroupEdge records that childGroup is a direct member of parentGroup and
+// addGroupEdge records that childID is a direct member of parentID and
 // propagates transitive closure updates to GROUP2GROUP.
-func (idx *leopardIndex) addGroupEdge(childGroup, parentGroup string) {
-	// Descendants of childGroup (including itself).
-	childDesc := idx.groupToGroup[childGroup]
-	if !childDesc.contains(childGroup) {
-		childDesc = childDesc.add(childGroup)
-		idx.groupToGroup[childGroup] = childDesc
+func (idx *leopardIndex) addGroupEdge(childID, parentID uint32) {
+	// Record direct edge.
+	bm := idx.directEdges[childID]
+	if bm == nil {
+		bm = roaring.New()
+		idx.directEdges[childID] = bm
 	}
+	bm.Add(parentID)
 
-	// For parentGroup and every ancestor of parentGroup, add all of childDesc.
-	ancestors := idx.ancestorsOf(parentGroup)
-	ancestors = append(ancestors, parentGroup)
+	// All descendants of childID (including itself).
+	childDesc := idx.computeDescendants(childID)
 
-	for _, ancestor := range ancestors {
-		cur := idx.groupToGroup[ancestor]
-		for _, d := range childDesc {
-			cur = cur.add(d)
+	// Add childDesc to parentID and every ancestor of parentID.
+	targets := idx.ancestorsOf(parentID)
+	targets = append(targets, parentID)
+	for _, t := range targets {
+		g2g := idx.groupToGroup[t]
+		if g2g == nil {
+			g2g = roaring.New()
+			idx.groupToGroup[t] = g2g
 		}
-		// Ensure ancestor includes itself.
-		cur = cur.add(ancestor)
-		idx.groupToGroup[ancestor] = cur
+		g2g.Or(childDesc)
+		g2g.Add(t) // reflexive: every group contains itself
 	}
 }
 
-// removeGroupEdge removes a direct child→parent edge and recomputes affected
-// GROUP2GROUP entries by full re-derivation from the remaining direct edges.
-//
-// Re-derivation is O(n²) in the worst case but correct. For the expected scale
-// of an in-process index this is acceptable; a production system would use
-// reference counting or a persistent graph store.
-func (idx *leopardIndex) removeGroupEdge(childGroup, parentGroup string) {
-	// Remove direct edge from a separate edge-list (we keep one implicitly
-	// via groupToGroup; rebuild from scratch for simplicity).
-	idx.rebuildGroupToGroup(childGroup, parentGroup)
-}
-
-// rebuildGroupToGroup recomputes the entire GROUP2GROUP map after removing the
-// edge childGroup→parentGroup. It does a BFS/DFS from every known root.
-func (idx *leopardIndex) rebuildGroupToGroup(removedChild, removedParent string) {
-	// Collect all known group IDs.
-	groups := make(map[string]struct{})
-	for g := range idx.groupToGroup {
-		groups[g] = struct{}{}
-	}
-	for _, set := range idx.memberToGroup {
-		for _, g := range set {
-			groups[g] = struct{}{}
+// removeGroupEdge removes the direct edge childID→parentID and recomputes
+// GROUP2GROUP for parentID and all its ancestors via BFS from directEdges.
+func (idx *leopardIndex) removeGroupEdge(childID, parentID uint32) {
+	// Remove direct edge.
+	if bm := idx.directEdges[childID]; bm != nil {
+		bm.Remove(parentID)
+		if bm.IsEmpty() {
+			delete(idx.directEdges, childID)
 		}
 	}
 
-	// We need the direct edge list. Reconstruct it from the current
-	// memberToGroup (user→group) and groupToGroup (only direct edges stored
-	// implicitly as the reflexive self-entry).
-	//
-	// Since we don't maintain a separate direct-edge list, we rebuild by
-	// clearing and replaying all known edges minus the removed one.
-	// This is a simplification; a production system would store direct edges.
-	//
-	// For now: clear all GROUP2GROUP entries for affected groups and leave
-	// note that callers must call rebuild after all deletes are applied.
-	// The simple approach: clear descendants of removedParent and rebuild only
-	// using self-reflexive entries. This is intentionally kept simple for v1.
-	_ = groups
-	_ = removedChild
-	_ = removedParent
-
-	// Conservative approach: wipe GROUP2GROUP entirely and let it be rebuilt
-	// lazily via subsequent writes. In production, implement a proper
-	// incremental delete.
-	//
-	// Only wipe entries that were derived via the removed edge.
-	// For now clear the full map for affected ancestors.
-	for g := range idx.groupToGroup {
-		idx.groupToGroup[g] = idx.groupToGroup[g].remove(removedChild)
+	// Recompute GROUP2GROUP for parentID and all its ancestors.
+	affected := idx.ancestorsOf(parentID)
+	affected = append(affected, parentID)
+	for _, nodeID := range affected {
+		newDesc := idx.computeDescendants(nodeID)
+		if newDesc.GetCardinality() == 0 {
+			delete(idx.groupToGroup, nodeID)
+		} else {
+			idx.groupToGroup[nodeID] = newDesc
+		}
 	}
 }
 
-// ancestorsOf returns all known groups that have groupID in their GROUP2GROUP.
-func (idx *leopardIndex) ancestorsOf(groupID string) []string {
-	var result []string
+// computeDescendants returns all descendants of groupID (including itself)
+// by BFS over the reverse of directEdges (parent→children direction).
+// Caller must hold idx.mu.
+func (idx *leopardIndex) computeDescendants(groupID uint32) *roaring.Bitmap {
+	result := roaring.New()
+	result.Add(groupID)
+
+	queue := []uint32{groupID}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		// Find children: nodes X where directEdges[X].Contains(cur).
+		for childID, parents := range idx.directEdges {
+			if parents.Contains(cur) && !result.Contains(childID) {
+				result.Add(childID)
+				queue = append(queue, childID)
+			}
+		}
+	}
+	return result
+}
+
+// ancestorsOf returns all group IDs that have groupID in their GROUP2GROUP
+// (i.e., all groups for which groupID is a descendant).
+func (idx *leopardIndex) ancestorsOf(groupID uint32) []uint32 {
+	var result []uint32
 	for g, descendants := range idx.groupToGroup {
-		if g != groupID && descendants.contains(groupID) {
+		if g != groupID && descendants.Contains(groupID) {
 			result = append(result, g)
 		}
 	}
 	return result
 }
 
-// isGroup returns true if the ID uses the configured group prefix.
+// isGroup returns true if id uses the configured group prefix.
 func (idx *leopardIndex) isGroup(id string) bool {
-	return len(id) > len(idx.groupPrefix) && id[:len(idx.groupPrefix)] == idx.groupPrefix
+	p := idx.cfg.GroupPrefix
+	return len(id) > len(p) && id[:len(p)] == p
+}
+
+// ensureSelf ensures GROUP2GROUP[groupID] contains groupID itself (reflexive).
+func (idx *leopardIndex) ensureSelf(groupID uint32) {
+	bm := idx.groupToGroup[groupID]
+	if bm == nil {
+		bm = roaring.New()
+		idx.groupToGroup[groupID] = bm
+	}
+	bm.Add(groupID)
 }

@@ -1,6 +1,7 @@
 package index
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -209,5 +210,22 @@ func TestApplyTupleDelete_GroupEdge_Diamond(t *testing.T) {
 	idx.ApplyTupleDelete("group:right", "member", "group:top")
 	if idx.IsMember("user:alice", "group:top") {
 		t.Fatal("alice should NOT be in top after both paths removed")
+	}
+}
+
+// BenchmarkIsMember_WideFanout benchmarks a user in one group that is a
+// member of 500 peer groups, checking membership against one of them.
+// This exercises the roaring bitmap intersection path with wider bitmaps.
+func BenchmarkIsMember_WideFanout(b *testing.B) {
+	idx := New()
+	idx.ApplyTupleWrite("user:alice", "member", "group:g0")
+	for i := 0; i < 500; i++ {
+		child := fmt.Sprintf("group:g%d", i)
+		parent := fmt.Sprintf("group:g%d", i+1)
+		idx.ApplyTupleWrite(child, "member", parent)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		idx.IsMember("user:alice", "group:g499")
 	}
 }

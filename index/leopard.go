@@ -2,9 +2,11 @@ package index
 
 import "sync"
 
-// groupRelation is the relation name that denotes group membership.
-// Tuples with this relation are indexed; all others are ignored.
-const groupRelation = "member"
+// defaultGroupRelation is the default relation name that denotes group membership.
+const defaultGroupRelation = "member"
+
+// defaultGroupPrefix is the default type prefix that identifies group objects.
+const defaultGroupPrefix = "group:"
 
 // leopardIndex is the concrete implementation of Index.
 //
@@ -17,13 +19,31 @@ type leopardIndex struct {
 	mu            sync.RWMutex
 	memberToGroup map[string]sortedSet // MEMBER2GROUP
 	groupToGroup  map[string]sortedSet // GROUP2GROUP
+	groupRelation string               // configured relation name
+	groupPrefix   string               // configured group prefix
 }
 
-// New returns an empty, thread-safe Leopard index.
+// New returns an empty, thread-safe Leopard index with default configuration.
 func New() Index {
+	return NewWithConfig(IndexConfig{})
+}
+
+// NewWithConfig returns an empty, thread-safe Leopard index with custom configuration.
+// If IndexConfig fields are empty, defaults are used (GroupRelation: "member", GroupPrefix: "group:").
+func NewWithConfig(cfg IndexConfig) Index {
+	groupRel := cfg.GroupRelation
+	if groupRel == "" {
+		groupRel = defaultGroupRelation
+	}
+	groupPfx := cfg.GroupPrefix
+	if groupPfx == "" {
+		groupPfx = defaultGroupPrefix
+	}
 	return &leopardIndex{
 		memberToGroup: make(map[string]sortedSet),
 		groupToGroup:  make(map[string]sortedSet),
+		groupRelation: groupRel,
+		groupPrefix:   groupPfx,
 	}
 }
 
@@ -34,13 +54,13 @@ func New() Index {
 //	user:alice   member   group:engineering
 //	group:backend member  group:engineering   (group-in-group)
 func (idx *leopardIndex) ApplyTupleWrite(user, relation, object string) {
-	if relation != groupRelation {
+	if relation != idx.groupRelation {
 		return
 	}
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
-	if isGroup(user) {
+	if idx.isGroup(user) {
 		// group-in-group edge: user (child group) → object (parent group)
 		idx.addGroupEdge(user, object)
 	} else {
@@ -56,13 +76,13 @@ func (idx *leopardIndex) ApplyTupleWrite(user, relation, object string) {
 
 // ApplyTupleDelete removes an existing relationship tuple.
 func (idx *leopardIndex) ApplyTupleDelete(user, relation, object string) {
-	if relation != groupRelation {
+	if relation != idx.groupRelation {
 		return
 	}
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
-	if isGroup(user) {
+	if idx.isGroup(user) {
 		idx.removeGroupEdge(user, object)
 	} else {
 		s := idx.memberToGroup[user].remove(object)
@@ -211,7 +231,7 @@ func (idx *leopardIndex) ancestorsOf(groupID string) []string {
 	return result
 }
 
-// isGroup returns true if the ID uses the "group:" type prefix.
-func isGroup(id string) bool {
-	return len(id) > 6 && id[:6] == "group:"
+// isGroup returns true if the ID uses the configured group prefix.
+func (idx *leopardIndex) isGroup(id string) bool {
+	return len(id) > len(idx.groupPrefix) && id[:len(idx.groupPrefix)] == idx.groupPrefix
 }

@@ -141,3 +141,73 @@ func TestNewWithConfig_Defaults(t *testing.T) {
 		t.Fatal("zero-value IndexConfig should use default relation and prefix")
 	}
 }
+
+// TestApplyTupleDelete_GroupEdge_Direct verifies that removing a group-in-group
+// edge correctly updates GROUP2GROUP so transitive membership is revoked.
+func TestApplyTupleDelete_GroupEdge_Direct(t *testing.T) {
+	idx := New()
+	idx.ApplyTupleWrite("group:backend", "member", "group:engineering")
+	idx.ApplyTupleWrite("user:alice", "member", "group:backend")
+
+	if !idx.IsMember("user:alice", "group:engineering") {
+		t.Fatal("alice should be in engineering before delete")
+	}
+
+	idx.ApplyTupleDelete("group:backend", "member", "group:engineering")
+
+	if idx.IsMember("user:alice", "group:engineering") {
+		t.Fatal("alice should NOT be in engineering after backend→engineering edge deleted")
+	}
+	if !idx.IsMember("user:alice", "group:backend") {
+		t.Fatal("alice should still be in backend")
+	}
+}
+
+// TestApplyTupleDelete_GroupEdge_Transitive verifies that removing an edge in
+// the middle of a chain revokes all downstream transitive memberships.
+func TestApplyTupleDelete_GroupEdge_Transitive(t *testing.T) {
+	idx := New()
+	// alice → backend → engineering → company
+	idx.ApplyTupleWrite("user:alice", "member", "group:backend")
+	idx.ApplyTupleWrite("group:backend", "member", "group:engineering")
+	idx.ApplyTupleWrite("group:engineering", "member", "group:company")
+
+	idx.ApplyTupleDelete("group:engineering", "member", "group:company")
+
+	if idx.IsMember("user:alice", "group:company") {
+		t.Fatal("alice should NOT be in company after engineering→company edge deleted")
+	}
+	if !idx.IsMember("user:alice", "group:engineering") {
+		t.Fatal("alice should still be in engineering")
+	}
+	if !idx.IsMember("user:alice", "group:backend") {
+		t.Fatal("alice should still be in backend")
+	}
+}
+
+// TestApplyTupleDelete_GroupEdge_Diamond verifies that a user with two paths
+// to a group retains membership after one path is removed.
+func TestApplyTupleDelete_GroupEdge_Diamond(t *testing.T) {
+	idx := New()
+	// Diamond: alice → left & right, left → top, right → top
+	idx.ApplyTupleWrite("user:alice", "member", "group:left")
+	idx.ApplyTupleWrite("user:alice", "member", "group:right")
+	idx.ApplyTupleWrite("group:left", "member", "group:top")
+	idx.ApplyTupleWrite("group:right", "member", "group:top")
+
+	if !idx.IsMember("user:alice", "group:top") {
+		t.Fatal("alice should be in top before any delete")
+	}
+
+	// Remove one path — alice still reachable via right.
+	idx.ApplyTupleDelete("group:left", "member", "group:top")
+	if !idx.IsMember("user:alice", "group:top") {
+		t.Fatal("alice should still be in top via right after left path removed")
+	}
+
+	// Remove second path — now unreachable.
+	idx.ApplyTupleDelete("group:right", "member", "group:top")
+	if idx.IsMember("user:alice", "group:top") {
+		t.Fatal("alice should NOT be in top after both paths removed")
+	}
+}

@@ -116,30 +116,28 @@ func itoa(n int) string {
 }
 
 func TestNewWithConfig_CustomRelation(t *testing.T) {
-	t.Skip("NewWithConfig not yet implemented in Task 4")
-	// idx := NewWithConfig(IndexConfig{
-	// 	GroupRelation: "belongs_to",
-	// 	GroupPrefix:   "team:",
-	// })
-	// idx.ApplyTupleWrite("user:alice", "belongs_to", "team:eng")
-	//
-	// if !idx.IsMember("user:alice", "team:eng") {
-	// 	t.Fatal("custom relation should be indexed")
-	// }
-	//
-	// // Default "member" relation must be ignored when a custom one is configured.
-	// idx.ApplyTupleWrite("user:bob", "member", "team:eng")
-	// if idx.IsMember("user:bob", "team:eng") {
-	// 	t.Fatal("default relation must be ignored when custom relation is configured")
-	// }
+	idx := NewWithConfig(IndexConfig{
+		GroupRelation: "belongs_to",
+		GroupPrefix:   "team:",
+	})
+	idx.ApplyTupleWrite("user:alice", "belongs_to", "team:eng")
+
+	if !idx.IsMember("user:alice", "team:eng") {
+		t.Fatal("custom relation should be indexed")
+	}
+
+	// Default "member" relation must be ignored when a custom one is configured.
+	idx.ApplyTupleWrite("user:bob", "member", "team:eng")
+	if idx.IsMember("user:bob", "team:eng") {
+		t.Fatal("default relation must be ignored when custom relation is configured")
+	}
 }
 
 func TestNewWithConfig_Defaults(t *testing.T) {
-	t.Skip("NewWithConfig not yet implemented in Task 4")
-	// // NewWithConfig with zero value must behave identically to New().
-	// idx := NewWithConfig(IndexConfig{})
-	// idx.ApplyTupleWrite("user:alice", "member", "group:eng")
-	// if !idx.IsMember("user:alice", "group:eng") {
-	// 	t.Fatal("zero-value IndexConfig should use default relation and prefix")
-	// }
+	// NewWithConfig with zero value must behave identically to New().
+	idx := NewWithConfig(IndexConfig{})
+	idx.ApplyTupleWrite("user:alice", "member", "group:eng")
+	if !idx.IsMember("user:alice", "group:eng") {
+		t.Fatal("zero-value IndexConfig should use default relation and prefix")
+	}
 }

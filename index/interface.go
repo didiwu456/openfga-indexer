@@ -11,11 +11,26 @@
 //	MEMBER2GROUP(U) ∩ GROUP2GROUP(G) ≠ ∅
 package index
 
+// IndexConfig controls which tuples the index tracks.
+// Zero value is valid and uses the defaults documented on each field.
+type IndexConfig struct {
+	// GroupRelation is the relation name that denotes group membership.
+	// Default: "member".
+	GroupRelation string
+
+	// GroupPrefix is the type prefix that identifies group objects.
+	// Default: "group:".
+	GroupPrefix string
+
+	// ObjectType labels this shard for multi-type deployments (e.g. "group").
+	// Optional; informational only within this package.
+	ObjectType string
+}
+
 // Index is the public interface for the Leopard in-memory index.
 // Implementations must be safe for concurrent use.
 type Index interface {
 	// ApplyTupleWrite records a new (user, relation, object) tuple.
-	// relation should be a group-membership relation (e.g. "member").
 	ApplyTupleWrite(user, relation, object string)
 
 	// ApplyTupleDelete removes an existing (user, relation, object) tuple.

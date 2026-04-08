@@ -116,22 +116,30 @@ func (s *mysqlStore) LoadAll(ctx context.Context, storeID string) (*LocalTable, 
 }
 
 func (s *mysqlStore) NextEpoch(ctx context.Context, storeID string) (uint64, error) {
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("stringtable.NextEpoch (mysql): begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO leopard_epochs (store_id, epoch)
 		VALUES (?, 1)
-		ON DUPLICATE KEY UPDATE epoch = epoch + 1, updated_at = now()`,
+		ON DUPLICATE KEY UPDATE epoch = epoch + 1`,
 		storeID,
-	)
-	if err != nil {
-		return 0, fmt.Errorf("stringtable.NextEpoch (mysql): %w", err)
+	); err != nil {
+		return 0, fmt.Errorf("stringtable.NextEpoch (mysql): upsert: %w", err)
 	}
+
 	var epoch uint64
-	err = s.db.QueryRowContext(ctx,
-		`SELECT epoch FROM leopard_epochs WHERE store_id = ?`,
-		storeID,
-	).Scan(&epoch)
-	if err != nil {
-		return 0, fmt.Errorf("stringtable.NextEpoch (mysql): %w", err)
+	if err := tx.QueryRowContext(ctx,
+		`SELECT epoch FROM leopard_epochs WHERE store_id = ?`, storeID,
+	).Scan(&epoch); err != nil {
+		return 0, fmt.Errorf("stringtable.NextEpoch (mysql): select: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("stringtable.NextEpoch (mysql): commit: %w", err)
 	}
 	return epoch, nil
 }

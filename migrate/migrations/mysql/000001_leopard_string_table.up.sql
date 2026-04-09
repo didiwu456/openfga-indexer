@@ -1,5 +1,5 @@
 CREATE TABLE IF NOT EXISTS leopard_string_table (
-    id         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    id         INT UNSIGNED    NOT NULL AUTO_INCREMENT PRIMARY KEY,
     store_id   VARCHAR(26)     NOT NULL,
     value      TEXT            NOT NULL,
     created_at DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,

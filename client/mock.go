@@ -23,6 +23,13 @@ func NewMock() *MockClient {
 	}
 }
 
+// NewMockClient creates a MockClient pre-loaded with the given tuples for ReadTuples.
+func NewMockClient(tuples []Tuple) *MockClient {
+	m := NewMock()
+	m.allTuples = append([]Tuple(nil), tuples...)
+	return m
+}
+
 // AllowCheck pre-programs a Check response.
 func (m *MockClient) AllowCheck(user, relation, object string, allowed bool) {
 	m.allowed[checkKey(user, relation, object)] = allowed

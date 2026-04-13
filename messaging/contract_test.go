@@ -96,4 +96,28 @@ func RunBusContract(t *testing.T, bus messaging.MessageBus) {
 			t.Fatal("timed out waiting for DeltaEvent")
 		}
 	})
+
+	t.Run("promotion_pubsub", func(t *testing.T) {
+		received := make(chan messaging.PromotionEvent, 1)
+		sub, err := bus.SubscribePromotion(ctx, func(e messaging.PromotionEvent) {
+			received <- e
+		})
+		if err != nil {
+			t.Fatalf("SubscribePromotion: %v", err)
+		}
+		defer sub.Cancel()
+
+		want := messaging.PromotionEvent{ClusterID: "cluster-a", InstanceID: "inst-1", PromotedAt: time.Now()}
+		if err := bus.PublishPromotion(ctx, want); err != nil {
+			t.Fatalf("PublishPromotion: %v", err)
+		}
+		select {
+		case got := <-received:
+			if got.ClusterID != want.ClusterID || got.InstanceID != want.InstanceID {
+				t.Fatalf("got %+v, want %+v", got, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for PromotionEvent")
+		}
+	})
 }

@@ -38,7 +38,6 @@ type Pipeline struct {
 	bus     messaging.MessageBus
 	opts    Options
 	mu      sync.Mutex
-	pending chan struct{}
 }
 
 // New creates a Pipeline.
@@ -56,17 +55,11 @@ func New(
 		storage: stor,
 		bus:     bus,
 		opts:    opts,
-		pending: make(chan struct{}, 1),
 	}
 }
 
 // Run performs one full build and returns the new epoch number.
 func (p *Pipeline) Run(ctx context.Context) (uint64, error) {
-	select {
-	case p.pending <- struct{}{}:
-	default:
-	}
-	<-p.pending
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.runLocked(ctx)
@@ -129,12 +122,46 @@ func (p *Pipeline) runLocked(ctx context.Context) (uint64, error) {
 				m2g[userID] = bm
 			}
 			bm.Add(objID)
-			g := g2g[objID]
-			if g == nil {
-				g = roaring.New()
-				g2g[objID] = g
+		}
+
+		// Compute transitive GROUP2GROUP closure via BFS.
+		// For each group G, g2g[G] should contain G and all groups that G transitively belongs to.
+
+		// Build direct parent map: child → set of direct parents
+		directParents := make(map[uint32][]uint32)
+		for _, t := range typeTuples {
+			if t.Relation != "member" {
+				continue
 			}
-			g.Add(objID)
+			// Only group→group edges contribute to GROUP2GROUP
+			if !strings.HasPrefix(t.User, objType+":") {
+				continue
+			}
+			childID := ids[t.User]
+			parentID := ids[t.Object]
+			directParents[childID] = append(directParents[childID], parentID)
+		}
+
+		// BFS: for each group, collect all ancestor groups (including self)
+		for groupStr, groupID := range ids {
+			if !strings.HasPrefix(groupStr, objType+":") {
+				continue
+			}
+			// BFS upward from groupID
+			visited := roaring.New()
+			visited.Add(groupID) // reflexive
+			queue := []uint32{groupID}
+			for len(queue) > 0 {
+				cur := queue[0]
+				queue = queue[1:]
+				for _, parent := range directParents[cur] {
+					if !visited.Contains(parent) {
+						visited.Add(parent)
+						queue = append(queue, parent)
+					}
+				}
+			}
+			g2g[groupID] = visited
 		}
 
 		data, err := serializeShard(m2g, g2g)

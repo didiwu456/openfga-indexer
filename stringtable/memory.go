@@ -3,7 +3,6 @@ package stringtable
 import (
 	"context"
 	"sync"
-	"sync/atomic"
 )
 
 type memStore struct {
@@ -31,7 +30,8 @@ func (s *memStore) Intern(_ context.Context, storeID, value string) (uint32, err
 	if id, ok := s.fwd[storeID][value]; ok {
 		return id, nil
 	}
-	id := atomic.AddUint32(&s.counter, 1) - 1
+	id := s.counter
+	s.counter++
 	s.fwd[storeID][value] = id
 	return id, nil
 }

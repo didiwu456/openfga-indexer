@@ -30,6 +30,9 @@ func (m *mockFGA) ListObjects(_ context.Context, _ client.ListObjectsRequest) ([
 	return nil, nil
 }
 func (m *mockFGA) ReadTuples(_ context.Context, _ string) ([]client.Tuple, error) { return nil, nil }
+func (m *mockFGA) WriteAuthorizationModel(_ context.Context, _ string, _ []byte) (string, error) {
+	return "", nil
+}
 
 type capturedDeltas struct {
 	events []messaging.DeltaEvent

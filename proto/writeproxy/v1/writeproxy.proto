@@ -1,0 +1,43 @@
+syntax = "proto3";
+package writeproxy.v1;
+option go_package = "github.com/yourorg/openfga-indexer/proto/writeproxy/v1;writeproxyv1";
+
+import "google/api/annotations.proto";
+
+service WriteProxyService {
+  rpc WriteTuples(WriteTuplesRequest) returns (WriteTuplesResponse) {
+    option (google.api.http) = { post: "/v1/stores/{store_id}/write" body: "*" };
+  }
+  rpc DeleteTuples(DeleteTuplesRequest) returns (DeleteTuplesResponse) {
+    option (google.api.http) = { post: "/v1/stores/{store_id}/delete" body: "*" };
+  }
+  rpc WriteAuthorizationModel(WriteAuthorizationModelRequest) returns (WriteAuthorizationModelResponse) {
+    option (google.api.http) = { post: "/v1/stores/{store_id}/authorization-models" body: "*" };
+  }
+}
+
+message TupleKey {
+  string user     = 1;
+  string relation = 2;
+  string object   = 3;
+}
+
+message WriteTuplesRequest {
+  string            store_id = 1;
+  repeated TupleKey writes   = 2;
+}
+message WriteTuplesResponse {}
+
+message DeleteTuplesRequest {
+  string            store_id = 1;
+  repeated TupleKey deletes  = 2;
+}
+message DeleteTuplesResponse {}
+
+message WriteAuthorizationModelRequest {
+  string store_id         = 1;
+  bytes  model_definition = 2;
+}
+message WriteAuthorizationModelResponse {
+  string model_id = 1;
+}

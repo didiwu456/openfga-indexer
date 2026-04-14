@@ -1,0 +1,65 @@
+syntax = "proto3";
+package leopard.v1;
+option go_package = "github.com/yourorg/openfga-indexer/proto/leopard/v1;leopardv1";
+
+import "google/api/annotations.proto";
+
+service IndexerService {
+  // Check returns whether user has the given relation to object.
+  rpc Check(CheckRequest) returns (CheckResponse) {
+    option (google.api.http) = {
+      post: "/v1/check"
+      body: "*"
+    };
+  }
+
+  // ListObjects returns all objects of objectType that user has relation to.
+  rpc ListObjects(ListObjectsRequest) returns (ListObjectsResponse) {
+    option (google.api.http) = {
+      post: "/v1/list-objects"
+      body: "*"
+    };
+  }
+
+  // GetStoreStatus returns index health for a store.
+  rpc GetStoreStatus(GetStoreStatusRequest) returns (GetStoreStatusResponse) {
+    option (google.api.http) = {
+      get: "/v1/stores/{store_id}/status"
+    };
+  }
+}
+
+message CheckRequest {
+  string store_id  = 1;
+  string user      = 2;
+  string relation  = 3;
+  string object    = 4;
+}
+
+message CheckResponse {
+  bool   allowed = 1;
+  string source  = 2; // "index_l1" | "index_l2" | "fga_api"
+}
+
+message ListObjectsRequest {
+  string store_id    = 1;
+  string user        = 2;
+  string relation    = 3;
+  string object_type = 4;
+}
+
+message ListObjectsResponse {
+  repeated string objects = 1;
+  string          source  = 2;
+}
+
+message GetStoreStatusRequest {
+  string store_id = 1;
+}
+
+message GetStoreStatusResponse {
+  string store_id      = 1;
+  uint64 current_epoch = 2;
+  string role          = 3; // "master" | "replica" | "degraded"
+  int64  shard_age_sec = 4;
+}

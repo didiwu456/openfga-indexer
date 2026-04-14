@@ -9,10 +9,11 @@ import (
 // It stores tuples as a simple slice and supports manual injection of
 // ReadChanges pages.
 type MockClient struct {
-	tuples      []TupleChange
-	allTuples   []Tuple             // pre-loaded for ReadTuples (offline build)
-	allowed     map[string]bool     // "user|relation|object" → allowed
-	objects     map[string][]string // "user|relation|type" → objects
+	tuples       []TupleChange
+	allTuples    []Tuple             // pre-loaded for ReadTuples (offline build)
+	allowed      map[string]bool     // "user|relation|object" → allowed
+	objects      map[string][]string // "user|relation|type" → objects
+	writeModelID string              // returned by WriteAuthorizationModel
 }
 
 // NewMock creates an empty MockClient.
@@ -74,6 +75,22 @@ func (m *MockClient) ReadChanges(_ context.Context, _, continuationToken string)
 	changes := append([]TupleChange(nil), m.tuples...)
 	m.tuples = m.tuples[:0] // consume
 	return changes, "", nil
+}
+
+// SetCheckResult configures the MockClient to return result for the given
+// (user, relation, object) triple.
+func (m *MockClient) SetCheckResult(user, relation, object string, result bool) {
+	m.allowed[checkKey(user, relation, object)] = result
+}
+
+// SetWriteModelResult configures the model ID returned by WriteAuthorizationModel.
+func (m *MockClient) SetWriteModelResult(modelID string) {
+	m.writeModelID = modelID
+}
+
+// WriteAuthorizationModel returns the pre-configured model ID.
+func (m *MockClient) WriteAuthorizationModel(_ context.Context, _ string, _ []byte) (string, error) {
+	return m.writeModelID, nil
 }
 
 func checkKey(user, relation, object string) string {

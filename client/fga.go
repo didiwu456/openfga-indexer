@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	openfga "github.com/openfga/go-sdk"
@@ -96,6 +97,20 @@ func (c *fgaClient) ReadTuples(ctx context.Context, _ string) ([]Tuple, error) {
 		}
 	}
 	return all, nil
+}
+
+// WriteAuthorizationModel writes a new authorization model to OpenFGA and
+// returns the assigned model ID.
+func (c *fgaClient) WriteAuthorizationModel(ctx context.Context, _ string, modelDef []byte) (string, error) {
+	var body openfga.WriteAuthorizationModelRequest
+	if err := json.Unmarshal(modelDef, &body); err != nil {
+		return "", fmt.Errorf("client.WriteAuthorizationModel: unmarshal: %w", err)
+	}
+	resp, err := c.inner.WriteAuthorizationModel(ctx).Body(body).Execute()
+	if err != nil {
+		return "", fmt.Errorf("client.WriteAuthorizationModel: %w", err)
+	}
+	return resp.GetAuthorizationModelId(), nil
 }
 
 // ReadChanges polls the OpenFGA ReadChanges endpoint and converts the

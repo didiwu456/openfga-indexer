@@ -62,4 +62,7 @@ type FGAClient interface {
 	// Returns the changes, the next continuation token, and any error.
 	// Pass an empty token to start from the beginning.
 	ReadChanges(ctx context.Context, storeID, continuationToken string) ([]TupleChange, string, error)
+
+	// WriteAuthorizationModel writes a new authorization model and returns its ID.
+	WriteAuthorizationModel(ctx context.Context, storeID string, modelDef []byte) (string, error)
 }
